@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finanzas en Pareja</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <div class="row between">
+    <h1>💰 Finanzas en Pareja</h1>
+    <span class="muted" id="sync"></span>
+  </div>
+  <nav id="tabs">
+    <button data-tab="resumen" class="active">Resumen</button>
+    <button data-tab="deudas">Deudas</button>
+    <button data-tab="hogar">Gastos del hogar</button>
+    <button data-tab="config">Ajustes</button>
+  </nav>
+</header>
+
+<main>
+  <!-- RESUMEN -->
+  <section id="tab-resumen" class="tab active"></section>
+
+  <!-- DEUDAS -->
+  <section id="tab-deudas" class="tab">
+    <div class="card">
+      <h2>Nueva deuda</h2>
+      <form id="form-deuda" class="grid">
+        <label>Tipo
+          <select name="tipo">
+            <option value="me-deben">Me deben (presté)</option>
+            <option value="debo">Yo debo</option>
+          </select>
+        </label>
+        <label>Persona
+          <input name="persona" required list="personas" placeholder="Nombre">
+          <datalist id="personas"></datalist>
+        </label>
+        <label>Monto
+          <input name="monto" type="number" step="0.01" min="0.01" required>
+        </label>
+        <label>Fecha
+          <input name="fecha" type="date" required>
+        </label>
+        <label>Vence (opcional)
+          <input name="vence" type="date">
+        </label>
+        <label class="wide">Concepto
+          <input name="concepto" placeholder="Ej. Préstamo para el carro">
+        </label>
+        <button class="primary">Agregar deuda</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <div class="row between">
+        <h2>Deudas registradas</h2>
+        <div class="filters">
+          <select id="f-tipo">
+            <option value="">Todas</option>
+            <option value="me-deben">Me deben</option>
+            <option value="debo">Yo debo</option>
+          </select>
+          <select id="f-estado">
+            <option value="pendiente">Pendientes</option>
+            <option value="">Todas</option>
+            <option value="pagada">Pagadas</option>
+          </select>
+        </div>
+      </div>
+      <div id="lista-deudas"></div>
+    </div>
+  </section>
+
+  <!-- HOGAR -->
+  <section id="tab-hogar" class="tab">
+    <div class="card" id="balance-hogar"></div>
+
+    <div class="card">
+      <h2>Nueva compra del hogar</h2>
+      <form id="form-gasto" class="grid">
+        <label>Pagó
+          <select name="pagador"></select>
+        </label>
+        <label>Monto
+          <input name="monto" type="number" step="0.01" min="0.01" required>
+        </label>
+        <label>Fecha
+          <input name="fecha" type="date" required>
+        </label>
+        <label>Categoría
+          <select name="categoria">
+            <option>Supermercado</option><option>Servicios</option><option>Renta</option>
+            <option>Limpieza</option><option>Muebles / Hogar</option><option>Salud</option>
+            <option>Ocio</option><option>Otro</option>
+          </select>
+        </label>
+        <label class="wide">Descripción
+          <input name="descripcion" required placeholder="Ej. Compra de la semana">
+        </label>
+        <label>% que corresponde a <span class="nombreA"></span>
+          <input name="pctA" type="number" min="0" max="100" step="1">
+        </label>
+        <button class="primary">Agregar compra</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <div class="row between">
+        <h2>Compras y liquidaciones</h2>
+        <select id="f-mes"></select>
+      </div>
+      <div id="lista-gastos"></div>
+    </div>
+  </section>
+
+  <!-- AJUSTES -->
+  <section id="tab-config" class="tab">
+    <div class="card">
+      <h2>Miembros de la pareja</h2>
+      <form id="form-config" class="grid">
+        <label>Persona A <input name="a" required></label>
+        <label>Persona B <input name="b" required></label>
+        <label>% por defecto de A (el resto es de B)
+          <input name="pct" type="number" min="0" max="100" step="1" required>
+        </label>
+        <label>Moneda
+          <input name="moneda" maxlength="4" required>
+        </label>
+        <button class="primary">Guardar</button>
+      </form>
+      <p class="muted">Usa 50% para dividir en partes iguales, o un % distinto si el reparto es proporcional a los ingresos.</p>
+    </div>
+    <div class="card" id="cuenta" hidden>
+      <h2>Cuenta y hogar compartido</h2>
+      <p>Sesión: <b id="cuenta-email"></b></p>
+      <p>Código del hogar: <b id="cuenta-code"></b><br>
+        <span class="muted">Tu pareja lo usa al registrarse para compartir los mismos datos.</span></p>
+      <button id="btn-logout">Cerrar sesión</button>
+    </div>
+    <div class="card">
+      <h2>Copia de seguridad</h2>
+      <p class="muted">Los datos se guardan solo en este navegador. Exporta un respaldo de vez en cuando.</p>
+      <div class="row">
+        <button id="btn-export">Exportar JSON</button>
+        <label class="btn">Importar JSON <input id="btn-import" type="file" accept="application/json" hidden></label>
+        <button id="btn-reset" class="danger">Borrar todo</button>
+      </div>
+    </div>
+  </section>
+</main>
+<div id="overlay" hidden><div class="card" id="overlay-box"></div></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
