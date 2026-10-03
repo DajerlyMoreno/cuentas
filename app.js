@@ -357,3 +357,7 @@ $('#form-deuda').fecha.value = today();
 $('#form-gasto').fecha.value = today();
 render();
 if (remoteOn) initRemote(); else setSync('Modo local (sin nube)');
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => { /* sin PWA, sigue funcionando */ }));
+}
