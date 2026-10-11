@@ -3,7 +3,7 @@ const KEY = 'finanzas-pareja-v1';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => ymd(new Date()); // fecha local (toISOString daba la de UTC y adelantaba el día por la noche)
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const round = n => Math.round(n * 100) / 100;
 
@@ -226,6 +226,8 @@ $('#tabs').addEventListener('click', e => {
   const t = e.target.dataset.tab; if (!t) return;
   $$('#tabs button').forEach(b => b.classList.toggle('active', b === e.target));
   $$('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + t));
+  if (!$('#form-deuda').fecha.value || t === 'deudas') $('#form-deuda').fecha.value = today();
+  if (!editId) $('#form-gasto').fecha.value = today();
 });
 
 $('#form-deuda').addEventListener('submit', e => {
@@ -258,7 +260,7 @@ let editId = null;
 function endEdit() {
   editId = null;
   const f = $('#form-gasto');
-  f.monto.value = ''; f.descripcion.value = ''; f.pctA.value = db.config.pct;
+  f.monto.value = ''; f.descripcion.value = ''; f.pctA.value = db.config.pct; f.fecha.value = today();
   $('#btn-gasto').textContent = 'Agregar compra'; $('#btn-cancel-edit').hidden = true;
   $('#form-gasto-titulo').textContent = 'Nueva compra del hogar';
 }
