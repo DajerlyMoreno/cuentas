@@ -80,8 +80,33 @@ function renderResumen() {
     </div>
     ${vencidas.length ? `<div class="card warn" style="margin-top:16px">⚠️ ${vencidas.length} deuda(s) vencida(s): ${vencidas.map(d => esc(d.persona)).join(', ')}</div>` : ''}
     <div class="card" style="margin-top:16px"><h2>Hogar</h2>${textoBalance(b)}</div>
+    ${gastoSemanal()}
     <div class="card"><h2>Saldo por persona</h2>
       ${filas ? `<table>${filas}</table>` : '<p class="muted">Sin deudas pendientes.</p>'}</div>`;
+}
+
+function gastoSemanal() {
+  const semanas = prevWeeks(8);
+  const filas = semanas.map(ws => {
+    const b = balance(db.gastos.filter(g => g.tipo === 'compra' && weekStart(g.fecha) === ws));
+    return { ws, ...b };
+  });
+  const [act, ant] = filas;
+  const max = Math.max(...filas.map(f => f.total), 0.01);
+  const prom = filas.reduce((s, f) => s + f.total, 0) / filas.length;
+  const dif = act.total - ant.total;
+  const cambio = ant.total > 0 ? ` <span class="${dif > 0 ? 'bad' : 'good'}">${dif > 0 ? '▲' : '▼'} ${Math.abs(dif / ant.total * 100).toFixed(0)}% vs. semana pasada</span>` : '';
+  return `<div class="card"><h2>Gasto semanal</h2>
+    <div class="stats" style="margin-bottom:12px">
+      <div class="stat"><div class="muted">Esta semana</div><div class="n">${money(act.total)}</div><div class="muted">${cambio || weekLabel(act.ws)}</div></div>
+      <div class="stat"><div class="muted">Semana pasada</div><div class="n">${money(ant.total)}</div></div>
+      <div class="stat"><div class="muted">Promedio (8 sem.)</div><div class="n">${money(prom)}</div></div>
+    </div>
+    <p class="muted">Esta semana: ${esc(nombre('a'))} ${money(act.pagoA)} · ${esc(nombre('b'))} ${money(act.pagoB)}</p>
+    <table>${filas.map(f => `<tr><td style="white-space:nowrap">${weekLabel(f.ws)}</td>
+      <td style="width:55%"><div class="bar split" style="width:${f.total / max * 100}%;min-width:${f.total ? 4 : 0}px"><span style="flex:${f.pagoA};background:var(--primary)"></span><span style="flex:${f.pagoB}"></span></div></td>
+      <td class="r">${money(f.total)}</td></tr>`).join('')}</table>
+    <p class="muted"><span style="color:var(--primary)">■</span> ${esc(nombre('a'))} <span class="good">■</span> ${esc(nombre('b'))}</p></div>`;
 }
 
 function textoBalance(b) {
@@ -128,15 +153,40 @@ function renderDeudas() {
   }).join('') : '<p class="muted">No hay deudas con este filtro.</p>';
 }
 
-function mesesDisponibles() {
-  return [...new Set(db.gastos.map(g => g.fecha.slice(0, 7)))].sort().reverse();
+/* ---------- semanas y bloqueo de registros ---------- */
+const HORA = 3600000;
+// Solo se puede modificar durante la primera hora; los registros sin marca de creación (anteriores) quedan bloqueados.
+const editable = g => !!g.creado && Date.now() - g.creado < HORA;
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+function weekStart(fecha) {            // lunes de la semana de 'YYYY-MM-DD'
+  const d = new Date(fecha + 'T00:00');
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return ymd(d);
+}
+function weekEnd(ws) { const d = new Date(ws + 'T00:00'); d.setDate(d.getDate() + 6); return ymd(d); }
+const weekLabel = ws => {
+  const f = s => new Date(s + 'T00:00').toLocaleDateString('es', { day: '2-digit', month: 'short' });
+  return `${f(ws)} – ${f(weekEnd(ws))}`;
+};
+function prevWeeks(n) {                // últimas n semanas, la actual primero
+  const out = []; const d = new Date(weekStart(today()) + 'T00:00');
+  for (let i = 0; i < n; i++) { out.push(ymd(d)); d.setDate(d.getDate() - 7); }
+  return out;
 }
 
 function renderHogar() {
-  const fm = $('#f-mes'), prev = fm.value;
-  const meses = mesesDisponibles();
-  fm.innerHTML = '<option value="">Todo el tiempo</option>' + meses.map(m => `<option value="${m}">${m}</option>`).join('');
-  fm.value = meses.includes(prev) ? prev : '';
+  const fv = $('#f-vista'), fp = $('#f-periodo'), prev = fp.value;
+  const keyOf = f => fv.value === 'semana' ? weekStart(f) : fv.value === 'mes' ? f.slice(0, 7) : '';
+  let periodos = [];
+  if (fv.value !== 'todo') {
+    periodos = [...new Set(db.gastos.map(g => keyOf(g.fecha)).concat(keyOf(today())))].sort().reverse();
+  }
+  fp.hidden = fv.value === 'todo';
+  fp.innerHTML = periodos.map(p => `<option value="${p}">${fv.value === 'semana' ? weekLabel(p) : p}</option>`).join('');
+  fp.value = periodos.includes(prev) ? prev : (periodos[0] || '');
+  const fm = { value: fv.value === 'todo' ? '' : fp.value };
+  const nombrePeriodo = fv.value === 'semana' ? 'la semana' : 'el mes';
 
   const sel = $('#form-gasto [name=pagador]');
   const cur = sel.value;
@@ -150,13 +200,18 @@ function renderHogar() {
   $('#balance-hogar').innerHTML = `<h2>¿Quién debe a quién?</h2>${textoBalance(b)}
     ${Math.abs(b.netoA) >= 0.005 ? `<button id="btn-liquidar">Registrar que ya se pagaron ${money(Math.abs(b.netoA))}</button>` : ''}`;
 
-  const lista = db.gastos.filter(g => !fm.value || g.fecha.startsWith(fm.value)).sort((x, y) => y.fecha.localeCompare(x.fecha));
+  const lista = db.gastos.filter(g => !fm.value || keyOf(g.fecha) === fm.value).sort((x, y) => y.fecha.localeCompare(x.fecha) || (y.creado || 0) - (x.creado || 0));
   const bm = balance(lista);
+  const acciones = g => {
+    if (!editable(g)) return '<span title="Inmutable: pasó más de una hora">🔒</span>';
+    const mins = Math.max(1, Math.ceil((g.creado + HORA - Date.now()) / 60000));
+    return `<span class="muted">${mins} min</span> ${g.tipo === 'compra' ? `<a href="#" data-editgasto="${g.id}" title="Editar">✎</a> ` : ''}<a href="#" data-delgasto="${g.id}" title="Eliminar">✕</a>`;
+  };
   $('#lista-gastos').innerHTML = lista.length ? `
-    ${fm.value ? `<p class="muted">Total del mes: ${money(bm.total)} · ${esc(nombre('a'))} puso ${money(bm.pagoA)}, ${esc(nombre('b'))} puso ${money(bm.pagoB)}</p>` : ''}
+    ${fm.value ? `<p class="muted">Total de ${nombrePeriodo}: ${money(bm.total)} · ${esc(nombre('a'))} puso ${money(bm.pagoA)}, ${esc(nombre('b'))} puso ${money(bm.pagoB)}</p>` : ''}
     <table>${lista.map(g => g.tipo === 'liquidacion'
-      ? `<tr><td>${fdate(g.fecha)}</td><td>🤝 ${esc(nombre(g.pagador))} pagó a ${esc(nombre(g.pagador === 'a' ? 'b' : 'a'))}</td><td class="r">${money(g.monto)}</td><td><a href="#" data-delgasto="${g.id}">✕</a></td></tr>`
-      : `<tr><td>${fdate(g.fecha)}</td><td>${esc(g.descripcion)}<div class="muted">${esc(g.categoria)} · pagó ${esc(nombre(g.pagador))} · ${g.pctA}/${100 - g.pctA}</div></td><td class="r">${money(g.monto)}</td><td><a href="#" data-delgasto="${g.id}">✕</a></td></tr>`).join('')}</table>`
+      ? `<tr><td>${fdate(g.fecha)}</td><td>🤝 ${esc(nombre(g.pagador))} pagó a ${esc(nombre(g.pagador === 'a' ? 'b' : 'a'))}</td><td class="r">${money(g.monto)}</td><td>${acciones(g)}</td></tr>`
+      : `<tr><td>${fdate(g.fecha)}</td><td>${esc(g.descripcion)}<div class="muted">${esc(g.categoria)} · pagó ${esc(nombre(g.pagador))} · ${g.pctA}/${100 - g.pctA}</div></td><td class="r">${money(g.monto)}</td><td>${acciones(g)}</td></tr>`).join('')}</table>`
     : '<p class="muted">Sin movimientos.</p>';
 }
 
@@ -199,26 +254,57 @@ $('#lista-deudas').addEventListener('click', e => {
 $('#f-tipo').addEventListener('change', renderDeudas);
 $('#f-estado').addEventListener('change', renderDeudas);
 
+let editId = null;
+function endEdit() {
+  editId = null;
+  const f = $('#form-gasto');
+  f.monto.value = ''; f.descripcion.value = ''; f.pctA.value = db.config.pct;
+  $('#btn-gasto').textContent = 'Agregar compra'; $('#btn-cancel-edit').hidden = true;
+  $('#form-gasto-titulo').textContent = 'Nueva compra del hogar';
+}
 $('#form-gasto').addEventListener('submit', e => {
   e.preventDefault();
   const f = e.target, v = Object.fromEntries(new FormData(f));
-  const pct = Math.min(100, Math.max(0, +v.pctA));
-  db.gastos.push({ id: uid(), tipo: 'compra', pagador: v.pagador, monto: round(+v.monto), fecha: v.fecha, categoria: v.categoria, descripcion: v.descripcion.trim(), pctA: pct });
-  f.monto.value = ''; f.descripcion.value = ''; save();
+  const datos = { pagador: v.pagador, monto: round(+v.monto), fecha: v.fecha, categoria: v.categoria, descripcion: v.descripcion.trim(), pctA: Math.min(100, Math.max(0, +v.pctA)) };
+  if (editId) {
+    const g = db.gastos.find(x => x.id === editId);
+    if (!g || !editable(g)) { alert('Pasó más de una hora: este registro ya no se puede modificar.'); endEdit(); render(); return; }
+    Object.assign(g, datos);
+  } else {
+    db.gastos.push({ id: uid(), tipo: 'compra', creado: Date.now(), ...datos });
+  }
+  endEdit(); save();
 });
-$('#f-mes').addEventListener('change', renderHogar);
+$('#btn-cancel-edit').addEventListener('click', endEdit);
+$('#f-vista').addEventListener('change', () => { $('#f-periodo').innerHTML = ''; renderHogar(); });
+$('#f-periodo').addEventListener('change', renderHogar);
+setInterval(renderHogar, 60000); // bloquea los registros cuando se cumple la hora
 
 $('#balance-hogar').addEventListener('click', e => {
   if (e.target.id !== 'btn-liquidar') return;
   const b = balance(db.gastos);
   const deudor = b.netoA > 0 ? 'b' : 'a';
-  db.gastos.push({ id: uid(), tipo: 'liquidacion', pagador: deudor, monto: Math.abs(b.netoA), fecha: today() });
+  db.gastos.push({ id: uid(), tipo: 'liquidacion', pagador: deudor, monto: Math.abs(b.netoA), fecha: today(), creado: Date.now() });
   save();
 });
 $('#lista-gastos').addEventListener('click', e => {
-  const id = e.target.dataset.delgasto; if (!id) return;
+  const ds = e.target.dataset, id = ds.delgasto || ds.editgasto; if (!id) return;
   e.preventDefault();
-  if (confirm('¿Eliminar este movimiento?')) { db.gastos = db.gastos.filter(g => g.id !== id); save(); }
+  const g = db.gastos.find(x => x.id === id);
+  if (!g || !editable(g)) { alert('Pasó más de una hora: este registro es inmutable.'); render(); return; }
+  if (ds.editgasto) {
+    if (g.tipo !== 'compra') return;
+    const f = $('#form-gasto');
+    editId = id;
+    f.pagador.value = g.pagador; f.monto.value = g.monto; f.fecha.value = g.fecha;
+    f.categoria.value = g.categoria; f.descripcion.value = g.descripcion; f.pctA.value = g.pctA;
+    $('#btn-gasto').textContent = 'Guardar cambios'; $('#btn-cancel-edit').hidden = false;
+    $('#form-gasto-titulo').textContent = 'Editar compra';
+    f.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } else if (confirm('¿Eliminar este movimiento?')) {
+    if (editId === id) endEdit();
+    db.gastos = db.gastos.filter(x => x.id !== id); save();
+  }
 });
 
 $('#form-config').addEventListener('submit', e => {

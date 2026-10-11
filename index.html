@@ -87,7 +87,8 @@
     <div class="card" id="balance-hogar"></div>
 
     <div class="card">
-      <h2>Nueva compra del hogar</h2>
+      <h2 id="form-gasto-titulo">Nueva compra del hogar</h2>
+      <p class="muted">Podrás editar o eliminar una compra durante 1 hora; después queda bloqueada.</p>
       <form id="form-gasto" class="grid">
         <label>Pagó
           <select name="pagador"></select>
@@ -111,14 +112,22 @@
         <label>% que corresponde a <span class="nombreA"></span>
           <input name="pctA" type="number" min="0" max="100" step="1">
         </label>
-        <button class="primary">Agregar compra</button>
+        <button class="primary" id="btn-gasto">Agregar compra</button>
+        <button type="button" id="btn-cancel-edit" hidden>Cancelar edición</button>
       </form>
     </div>
 
     <div class="card">
       <div class="row between">
         <h2>Compras y liquidaciones</h2>
-        <select id="f-mes"></select>
+        <div class="filters">
+          <select id="f-vista">
+            <option value="semana">Por semana</option>
+            <option value="mes">Por mes</option>
+            <option value="todo">Todo</option>
+          </select>
+          <select id="f-periodo"></select>
+        </div>
       </div>
       <div id="lista-gastos"></div>
     </div>
