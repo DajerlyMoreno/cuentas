@@ -3,14 +3,37 @@ const KEY = 'finanzas-pareja-v1';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-const today = () => ymd(new Date()); // fecha local (toISOString daba la de UTC y adelantaba el día por la noche)
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const round = n => Math.round(n * 100) / 100;
 
+/* ---------- fechas (siempre hora local) ---------- */
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const today = () => ymd(new Date());
+const fdate = d => d ? new Date(d + 'T00:00').toLocaleDateString('es', { day: '2-digit', month: 'short' }) : '';
+function dayLabel(f) {
+  if (f === today()) return 'Hoy';
+  const y = new Date(); y.setDate(y.getDate() - 1);
+  if (f === ymd(y)) return 'Ayer';
+  return new Date(f + 'T00:00').toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'short' });
+}
+function weekStart(fecha) {            // lunes de la semana de 'YYYY-MM-DD'
+  const d = new Date(fecha + 'T00:00');
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return ymd(d);
+}
+function weekEnd(ws) { const d = new Date(ws + 'T00:00'); d.setDate(d.getDate() + 6); return ymd(d); }
+const weekLabel = ws => `${fdate(ws)} – ${fdate(weekEnd(ws))}`;
+function prevWeeks(n) {                // últimas n semanas, la actual primero
+  const out = []; const d = new Date(weekStart(today()) + 'T00:00');
+  for (let i = 0; i < n; i++) { out.push(ymd(d)); d.setDate(d.getDate() - 7); }
+  return out;
+}
+
+/* ---------- datos ---------- */
 const defaults = () => ({
   config: { a: 'Persona A', b: 'Persona B', pct: 50, moneda: '$' },
-  deudas: [],   // {id,tipo,persona,monto,fecha,vence,concepto,pagos:[{id,monto,fecha}]}
-  gastos: []    // {id,tipo:'compra'|'liquidacion',pagador,monto,fecha,categoria,descripcion,pctA}
+  gastos: []    // {id,tipo:'compra'|'liquidacion',pagador,monto,fecha,creado,categoria,descripcion,pctA}
 });
 let db = load();
 
@@ -27,14 +50,22 @@ function save() {
   schedulePush();
 }
 
-const money = n => `${db.config.moneda}${round(n).toLocaleString('es', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const fdate = d => d ? new Date(d + 'T00:00').toLocaleDateString('es', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+const money = n => {
+  const v = round(n);
+  return `${db.config.moneda}${v.toLocaleString('es', { minimumFractionDigits: Number.isInteger(v) ? 0 : 2, maximumFractionDigits: 2 })}`;
+};
+const nombre = k => db.config[k];
+const otro = k => (k === 'a' ? 'b' : 'a');
+const CAT = { 'Supermercado': '🛒', 'Servicios': '💡', 'Renta': '🏠', 'Limpieza': '🧼', 'Muebles / Hogar': '🛋️', 'Salud': '💊', 'Ocio': '🎬', 'Otro': '🧾' };
+const emoji = g => g.tipo === 'liquidacion' ? '💸' : (CAT[g.categoria] || '🧾');
+
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, 2800);
+}
 
 /* ---------- cálculos ---------- */
-const pagado = d => round(d.pagos.reduce((s, p) => s + p.monto, 0));
-const saldo = d => round(d.monto - pagado(d));
-
-// pagador: 'a' | 'b'. Devuelve totales y saldo neto.
+// netoA > 0: A puso de más y B le debe. Un pago de A a B reduce lo que A había adelantado.
 function balance(gastos) {
   let pagoA = 0, pagoB = 0, cuotaA = 0, cuotaB = 0, liqA = 0, liqB = 0, total = 0;
   for (const g of gastos) {
@@ -47,172 +78,149 @@ function balance(gastos) {
     cuotaA += g.monto * g.pctA / 100;
     cuotaB += g.monto * (100 - g.pctA) / 100;
   }
-  // netoA > 0: A puso de más y B le debe. Una liquidación de A a B reduce lo que A había adelantado.
   const netoA = round(pagoA - cuotaA + liqA - liqB);
   return { total: round(total), pagoA: round(pagoA), pagoB: round(pagoB), cuotaA: round(cuotaA), cuotaB: round(cuotaB), netoA };
 }
-const nombre = k => db.config[k];
+
+// Movimientos "vivos": todo lo ocurrido desde la última vez que quedaron a mano.
+// Sin importar su fecha: mientras haya deuda, se ve de qué es.
+const orden = g => g.creado || Date.parse(g.fecha + 'T00:00');
+function pendientes() {
+  const todos = [...db.gastos].sort((x, y) => orden(x) - orden(y));
+  let cur = [];
+  for (const g of todos) {
+    cur.push(g);
+    if (Math.abs(balance(cur).netoA) < 0.005) cur = [];
+  }
+  return cur;
+}
+
+/* ---------- bloqueo de registros ---------- */
+const HORA = 3600000;
+// Solo se puede modificar durante la primera hora; los registros sin marca de creación (anteriores) quedan bloqueados.
+const editable = g => !!g.creado && Date.now() - g.creado < HORA;
+const minsLeft = g => Math.max(1, Math.ceil((g.creado + HORA - Date.now()) / 60000));
 
 /* ---------- render ---------- */
 function render() {
-  renderResumen(); renderDeudas(); renderHogar(); renderConfig();
+  renderInicio(); renderMovs(); renderResumen(); renderConfig(); renderForm();
 }
 
-function renderResumen() {
-  const activas = db.deudas.filter(d => saldo(d) > 0);
-  const meDeben = round(activas.filter(d => d.tipo === 'me-deben').reduce((s, d) => s + saldo(d), 0));
-  const debo = round(activas.filter(d => d.tipo === 'debo').reduce((s, d) => s + saldo(d), 0));
-  const b = balance(db.gastos);
-  const vencidas = activas.filter(d => d.vence && d.vence < today());
+function renderInicio() {
+  const pend = pendientes(), b = balance(pend);
+  const deuda = Math.abs(b.netoA) >= 0.005;
+  const deudor = b.netoA > 0 ? 'b' : 'a', acre = otro(deudor);
+  let html = `<div class="hero"><div class="hero-label">Saldo a pagar</div>`;
+  if (deuda) {
+    html += `<div class="hero-amount">${money(Math.abs(b.netoA))}</div>
+      <div class="hero-sub"><b>${esc(nombre(deudor))}</b> le debe a <b>${esc(nombre(acre))}</b></div>
+      <button class="hero-btn" id="btn-pagar">Registrar pago</button>`;
+  } else {
+    html += `<div class="hero-amount">${money(0)}</div><div class="hero-sub">✅ Están a mano</div>`;
+  }
+  html += '</div>';
 
-  // saldo por persona
-  const porPersona = {};
-  activas.forEach(d => { porPersona[d.persona] = (porPersona[d.persona] || 0) + (d.tipo === 'me-deben' ? 1 : -1) * saldo(d); });
-  const filas = Object.entries(porPersona).sort((x, y) => Math.abs(y[1]) - Math.abs(x[1]))
-    .map(([p, v]) => `<tr><td>${esc(p)}</td><td class="r ${v >= 0 ? 'good' : 'bad'}">${v >= 0 ? 'te debe ' : 'le debes '}${money(Math.abs(v))}</td></tr>`).join('');
+  if (deuda) {
+    const bruto = round(b.pagoA - b.cuotaA);           // diferencia antes de pagos
+    const pagado = round(Math.abs(bruto) - Math.abs(b.netoA));
+    const filas = ['a', 'b'].map(k => `
+      <div class="line"><span>${esc(nombre(k))}</span><span>compró <b>${money(b['pago' + k.toUpperCase()])}</b> · le tocaba <b>${money(b['cuota' + k.toUpperCase()])}</b></span></div>`).join('');
+    html += `<div class="card"><h2>¿Por qué se debe?</h2>
+      <p class="expl">En total se compraron <b>${money(b.total)}</b> para el hogar y cada quien debía poner su parte:</p>
+      ${filas}
+      <p class="expl"><b>${esc(nombre(acre))}</b> puso <b>${money(Math.abs(bruto))}</b> de más, y eso es lo que <b>${esc(nombre(deudor))}</b> le debe.
+      ${pagado > 0.005 && (bruto > 0) === (b.netoA > 0) ? `Ya se pagaron ${money(pagado)}, falta <b>${money(Math.abs(b.netoA))}</b>.` : ''}</p>
+    </div>`;
 
-  $('#tab-resumen').innerHTML = `
-    <div class="stats">
-      <div class="stat"><div class="muted">Me deben</div><div class="n good">${money(meDeben)}</div></div>
-      <div class="stat"><div class="muted">Yo debo</div><div class="n bad">${money(debo)}</div></div>
-      <div class="stat"><div class="muted">Balance de deudas</div><div class="n ${meDeben - debo >= 0 ? 'good' : 'bad'}">${money(meDeben - debo)}</div></div>
-      <div class="stat"><div class="muted">Gastos del hogar</div><div class="n">${money(b.total)}</div></div>
-    </div>
-    ${vencidas.length ? `<div class="card warn" style="margin-top:16px">⚠️ ${vencidas.length} deuda(s) vencida(s): ${vencidas.map(d => esc(d.persona)).join(', ')}</div>` : ''}
-    <div class="card" style="margin-top:16px"><h2>Hogar</h2>${textoBalance(b)}</div>
-    ${gastoSemanal()}
-    <div class="card"><h2>Saldo por persona</h2>
-      ${filas ? `<table>${filas}</table>` : '<p class="muted">Sin deudas pendientes.</p>'}</div>`;
+    const compras = pend.filter(g => g.tipo === 'compra');
+    html += `<h2 style="margin:18px 4px 8px">Compras sin saldar</h2>`;
+    for (const k of ['a', 'b']) {
+      const items = compras.filter(g => g.pagador === k).sort((x, y) => y.fecha.localeCompare(x.fecha));
+      const sum = round(items.reduce((s, g) => s + g.monto, 0));
+      html += `<div class="card"><div class="buyer"><h3>🛍️ Compró ${esc(nombre(k))}</h3><b>${money(sum)}</b></div>
+        ${items.length ? items.map(g => `<div class="mini"><span>${emoji(g)} ${esc(g.descripcion)}<br><span class="muted">${fdate(g.fecha)} · ${esc(g.categoria)}${g.pctA !== 50 ? ` · ${g.pctA}/${100 - g.pctA}` : ''}</span></span><b>${money(g.monto)}</b></div>`).join('')
+          : '<p class="muted" style="margin:0">Nada por ahora.</p>'}
+      </div>`;
+    }
+    const pagos = pend.filter(g => g.tipo === 'liquidacion');
+    if (pagos.length) {
+      html += `<div class="card"><h3>💸 Pagos ya hechos</h3>${pagos.map(g => `<div class="mini"><span>${esc(nombre(g.pagador))} pagó a ${esc(nombre(otro(g.pagador)))}<br><span class="muted">${fdate(g.fecha)}</span></span><b class="good">${money(g.monto)}</b></div>`).join('')}</div>`;
+    }
+  } else {
+    html += '<p class="muted" style="text-align:center">Toca <b>+</b> para registrar una compra del hogar.</p>';
+  }
+  $('#tab-inicio').innerHTML = html;
+}
+
+function renderMovs() {
+  const fv = $('#f-vista'), fp = $('#f-periodo'), prev = fp.value;
+  const keyOf = f => fv.value === 'semana' ? weekStart(f) : fv.value === 'mes' ? f.slice(0, 7) : '';
+  let periodos = [];
+  if (fv.value !== 'todo') periodos = [...new Set(db.gastos.map(g => keyOf(g.fecha)).concat(keyOf(today())))].sort().reverse();
+  fp.hidden = fv.value === 'todo';
+  fp.innerHTML = periodos.map(p => `<option value="${p}">${fv.value === 'semana' ? weekLabel(p) : new Date(p + '-01T00:00').toLocaleDateString('es', { month: 'long', year: 'numeric' })}</option>`).join('');
+  fp.value = periodos.includes(prev) ? prev : (periodos[0] || '');
+  const sel = fv.value === 'todo' ? '' : fp.value;
+
+  const lista = db.gastos.filter(g => !sel || keyOf(g.fecha) === sel)
+    .sort((x, y) => y.fecha.localeCompare(x.fecha) || orden(y) - orden(x));
+  const bm = balance(lista);
+  $('#movs-total').innerHTML = lista.length ? `<div class="card"><div class="buyer"><span class="muted">Total gastado</span><b style="font-size:20px">${money(bm.total)}</b></div>
+    <div class="muted">${esc(nombre('a'))} puso ${money(bm.pagoA)} · ${esc(nombre('b'))} puso ${money(bm.pagoB)}</div></div>` : '';
+
+  let html = '', dia = '';
+  for (const g of lista) {
+    if (g.fecha !== dia) { dia = g.fecha; html += `<div class="day">${esc(dayLabel(dia))}</div>`; }
+    const ed = editable(g);
+    const titulo = g.tipo === 'liquidacion' ? `${esc(nombre(g.pagador))} pagó a ${esc(nombre(otro(g.pagador)))}` : esc(g.descripcion);
+    const sub = g.tipo === 'liquidacion' ? 'Pago entre ustedes'
+      : `Pagó ${esc(nombre(g.pagador))} · ${esc(g.categoria)}${g.pctA !== 50 ? ` · ${g.pctA}/${100 - g.pctA}` : ''}`;
+    html += `<div class="mov ${g.tipo === 'liquidacion' ? 'pago' : ''} tap" data-mov="${g.id}">
+      <div class="ico">${emoji(g)}</div>
+      <div class="mov-body"><div class="mov-t">${titulo}</div><div class="muted">${sub}</div></div>
+      <div class="mov-r"><div class="mov-a">${money(g.monto)}</div><div class="muted">${ed ? `✎ ${minsLeft(g)} min` : '🔒'}</div></div></div>`;
+  }
+  $('#lista-gastos').innerHTML = html || '<p class="muted" style="text-align:center;margin-top:30px">Sin movimientos en este periodo.</p>';
 }
 
 function gastoSemanal() {
-  const semanas = prevWeeks(8);
-  const filas = semanas.map(ws => {
-    const b = balance(db.gastos.filter(g => g.tipo === 'compra' && weekStart(g.fecha) === ws));
-    return { ws, ...b };
-  });
+  const filas = prevWeeks(8).map(ws => ({ ws, ...balance(db.gastos.filter(g => g.tipo === 'compra' && weekStart(g.fecha) === ws)) }));
   const [act, ant] = filas;
   const max = Math.max(...filas.map(f => f.total), 0.01);
   const prom = filas.reduce((s, f) => s + f.total, 0) / filas.length;
   const dif = act.total - ant.total;
-  const cambio = ant.total > 0 ? ` <span class="${dif > 0 ? 'bad' : 'good'}">${dif > 0 ? '▲' : '▼'} ${Math.abs(dif / ant.total * 100).toFixed(0)}% vs. semana pasada</span>` : '';
+  const cambio = ant.total > 0 ? `<span class="${dif > 0 ? 'bad' : 'good'}">${dif > 0 ? '▲' : '▼'} ${Math.abs(dif / ant.total * 100).toFixed(0)}% vs. semana pasada</span>` : weekLabel(act.ws);
   return `<div class="card"><h2>Gasto semanal</h2>
     <div class="stats" style="margin-bottom:12px">
-      <div class="stat"><div class="muted">Esta semana</div><div class="n">${money(act.total)}</div><div class="muted">${cambio || weekLabel(act.ws)}</div></div>
-      <div class="stat"><div class="muted">Semana pasada</div><div class="n">${money(ant.total)}</div></div>
+      <div class="stat"><div class="muted">Esta semana</div><div class="n">${money(act.total)}</div><div class="muted">${cambio}</div></div>
       <div class="stat"><div class="muted">Promedio (8 sem.)</div><div class="n">${money(prom)}</div></div>
     </div>
-    <p class="muted">Esta semana: ${esc(nombre('a'))} ${money(act.pagoA)} · ${esc(nombre('b'))} ${money(act.pagoB)}</p>
     <table>${filas.map(f => `<tr><td style="white-space:nowrap">${weekLabel(f.ws)}</td>
-      <td style="width:55%"><div class="bar split" style="width:${f.total / max * 100}%;min-width:${f.total ? 4 : 0}px"><span style="flex:${f.pagoA};background:var(--primary)"></span><span style="flex:${f.pagoB}"></span></div></td>
+      <td style="width:45%"><div class="bar split" style="width:${f.total / max * 100}%;min-width:${f.total ? 4 : 0}px"><span style="flex:${f.pagoA};background:var(--primary)"></span><span style="flex:${f.pagoB}"></span></div></td>
       <td class="r">${money(f.total)}</td></tr>`).join('')}</table>
-    <p class="muted"><span style="color:var(--primary)">■</span> ${esc(nombre('a'))} <span class="good">■</span> ${esc(nombre('b'))}</p></div>`;
+    <p class="muted"><span style="color:var(--primary)">■</span> ${esc(nombre('a'))} &nbsp; <span style="color:var(--accent)">■</span> ${esc(nombre('b'))}</p></div>`;
 }
 
-function textoBalance(b) {
-  if (!b.total) return '<p class="muted">Aún no hay compras registradas.</p>';
-  let msg;
-  if (Math.abs(b.netoA) < 0.005) msg = '✅ Están a mano.';
-  else if (b.netoA > 0) msg = `<b>${esc(nombre('b'))}</b> debe pagar <b class="bad">${money(b.netoA)}</b> a <b>${esc(nombre('a'))}</b>.`;
-  else msg = `<b>${esc(nombre('a'))}</b> debe pagar <b class="bad">${money(-b.netoA)}</b> a <b>${esc(nombre('b'))}</b>.`;
-  const pa = b.total ? b.pagoA / b.total * 100 : 0;
-  return `
-    <div class="callout">${msg}</div>
-    <div class="bar split"><span style="width:${pa}%"></span><span style="width:${100 - pa}%"></span></div>
-    <table>
-      <tr><th></th><th class="r">${esc(nombre('a'))}</th><th class="r">${esc(nombre('b'))}</th></tr>
-      <tr><td>Ha aportado</td><td class="r">${money(b.pagoA)}</td><td class="r">${money(b.pagoB)}</td></tr>
-      <tr><td>Le corresponde</td><td class="r">${money(b.cuotaA)}</td><td class="r">${money(b.cuotaB)}</td></tr>
-      <tr><td>Diferencia</td><td class="r ${b.netoA >= 0 ? 'good' : 'bad'}">${money(b.netoA)}</td><td class="r ${b.netoA <= 0 ? 'good' : 'bad'}">${money(-b.netoA)}</td></tr>
-    </table>`;
-}
+function renderResumen() {
+  const mes = today().slice(0, 7);
+  const delMes = db.gastos.filter(g => g.tipo === 'compra' && g.fecha.startsWith(mes));
+  const b = balance(delMes);
+  const porCat = {};
+  delMes.forEach(g => { porCat[g.categoria] = (porCat[g.categoria] || 0) + g.monto; });
+  const cats = Object.entries(porCat).sort((x, y) => y[1] - x[1]);
+  const maxC = cats.length ? cats[0][1] : 1;
+  const nombreMes = new Date(mes + '-01T00:00').toLocaleDateString('es', { month: 'long' });
 
-function renderDeudas() {
-  $('#personas').innerHTML = [...new Set(db.deudas.map(d => d.persona))].map(p => `<option value="${esc(p)}">`).join('');
-  const ft = $('#f-tipo').value, fe = $('#f-estado').value;
-  const lista = db.deudas.filter(d => (!ft || d.tipo === ft) && (!fe || (fe === 'pagada') === (saldo(d) <= 0)))
-    .sort((a, b) => b.fecha.localeCompare(a.fecha));
-  $('#lista-deudas').innerHTML = lista.length ? lista.map(d => {
-    const s = saldo(d), p = pagado(d), pct = Math.min(100, p / d.monto * 100);
-    const venc = d.vence && s > 0 && d.vence < today();
-    return `<div class="item">
-      <div class="row between">
-        <div><b>${esc(d.persona)}</b> <span class="badge ${d.tipo === 'me-deben' ? 'good' : 'bad'}">${d.tipo === 'me-deben' ? 'Me debe' : 'Le debo'}</span>
-          ${s <= 0 ? '<span class="badge good">Pagada</span>' : ''}${venc ? '<span class="badge warn">Vencida</span>' : ''}
-          <div class="muted">${esc(d.concepto || 'Sin concepto')} · ${fdate(d.fecha)}${d.vence ? ' · vence ' + fdate(d.vence) : ''}</div></div>
-        <div style="text-align:right"><b>${money(s)}</b><div class="muted">de ${money(d.monto)}</div></div>
-      </div>
-      <div class="bar"><span style="width:${pct}%"></span></div>
-      ${d.pagos.length ? `<div class="muted">${d.pagos.map(x => `${fdate(x.fecha)}: ${money(x.monto)} <a href="#" data-delpago="${d.id}|${x.id}">✕</a>`).join(' · ')}</div>` : ''}
-      <div class="pay">
-        ${s > 0 ? `<input type="number" step="0.01" min="0.01" max="${s}" placeholder="Abono" data-abono="${d.id}">
-        <button class="small primary" data-pagar="${d.id}">Registrar pago</button>
-        <button class="small" data-liquidar="${d.id}">Pagar todo</button>` : ''}
-        <button class="small danger" data-deldeuda="${d.id}">Eliminar</button>
-      </div></div>`;
-  }).join('') : '<p class="muted">No hay deudas con este filtro.</p>';
-}
-
-/* ---------- semanas y bloqueo de registros ---------- */
-const HORA = 3600000;
-// Solo se puede modificar durante la primera hora; los registros sin marca de creación (anteriores) quedan bloqueados.
-const editable = g => !!g.creado && Date.now() - g.creado < HORA;
-const pad = n => String(n).padStart(2, '0');
-const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-function weekStart(fecha) {            // lunes de la semana de 'YYYY-MM-DD'
-  const d = new Date(fecha + 'T00:00');
-  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-  return ymd(d);
-}
-function weekEnd(ws) { const d = new Date(ws + 'T00:00'); d.setDate(d.getDate() + 6); return ymd(d); }
-const weekLabel = ws => {
-  const f = s => new Date(s + 'T00:00').toLocaleDateString('es', { day: '2-digit', month: 'short' });
-  return `${f(ws)} – ${f(weekEnd(ws))}`;
-};
-function prevWeeks(n) {                // últimas n semanas, la actual primero
-  const out = []; const d = new Date(weekStart(today()) + 'T00:00');
-  for (let i = 0; i < n; i++) { out.push(ymd(d)); d.setDate(d.getDate() - 7); }
-  return out;
-}
-
-function renderHogar() {
-  const fv = $('#f-vista'), fp = $('#f-periodo'), prev = fp.value;
-  const keyOf = f => fv.value === 'semana' ? weekStart(f) : fv.value === 'mes' ? f.slice(0, 7) : '';
-  let periodos = [];
-  if (fv.value !== 'todo') {
-    periodos = [...new Set(db.gastos.map(g => keyOf(g.fecha)).concat(keyOf(today())))].sort().reverse();
-  }
-  fp.hidden = fv.value === 'todo';
-  fp.innerHTML = periodos.map(p => `<option value="${p}">${fv.value === 'semana' ? weekLabel(p) : p}</option>`).join('');
-  fp.value = periodos.includes(prev) ? prev : (periodos[0] || '');
-  const fm = { value: fv.value === 'todo' ? '' : fp.value };
-  const nombrePeriodo = fv.value === 'semana' ? 'la semana' : 'el mes';
-
-  const sel = $('#form-gasto [name=pagador]');
-  const cur = sel.value;
-  sel.innerHTML = `<option value="a">${esc(nombre('a'))}</option><option value="b">${esc(nombre('b'))}</option>`;
-  if (cur) sel.value = cur;
-  $$('.nombreA').forEach(e => e.textContent = nombre('a'));
-  const pctIn = $('#form-gasto [name=pctA]');
-  if (!pctIn.value) pctIn.value = db.config.pct;
-
-  const b = balance(db.gastos); // el balance de deuda siempre es acumulado
-  $('#balance-hogar').innerHTML = `<h2>¿Quién debe a quién?</h2>${textoBalance(b)}
-    ${Math.abs(b.netoA) >= 0.005 ? `<button id="btn-liquidar">Registrar que ya se pagaron ${money(Math.abs(b.netoA))}</button>` : ''}`;
-
-  const lista = db.gastos.filter(g => !fm.value || keyOf(g.fecha) === fm.value).sort((x, y) => y.fecha.localeCompare(x.fecha) || (y.creado || 0) - (x.creado || 0));
-  const bm = balance(lista);
-  const acciones = g => {
-    if (!editable(g)) return '<span title="Inmutable: pasó más de una hora">🔒</span>';
-    const mins = Math.max(1, Math.ceil((g.creado + HORA - Date.now()) / 60000));
-    return `<span class="muted">${mins} min</span> ${g.tipo === 'compra' ? `<a href="#" data-editgasto="${g.id}" title="Editar">✎</a> ` : ''}<a href="#" data-delgasto="${g.id}" title="Eliminar">✕</a>`;
-  };
-  $('#lista-gastos').innerHTML = lista.length ? `
-    ${fm.value ? `<p class="muted">Total de ${nombrePeriodo}: ${money(bm.total)} · ${esc(nombre('a'))} puso ${money(bm.pagoA)}, ${esc(nombre('b'))} puso ${money(bm.pagoB)}</p>` : ''}
-    <table>${lista.map(g => g.tipo === 'liquidacion'
-      ? `<tr><td>${fdate(g.fecha)}</td><td>🤝 ${esc(nombre(g.pagador))} pagó a ${esc(nombre(g.pagador === 'a' ? 'b' : 'a'))}</td><td class="r">${money(g.monto)}</td><td>${acciones(g)}</td></tr>`
-      : `<tr><td>${fdate(g.fecha)}</td><td>${esc(g.descripcion)}<div class="muted">${esc(g.categoria)} · pagó ${esc(nombre(g.pagador))} · ${g.pctA}/${100 - g.pctA}</div></td><td class="r">${money(g.monto)}</td><td>${acciones(g)}</td></tr>`).join('')}</table>`
-    : '<p class="muted">Sin movimientos.</p>';
+  $('#tab-resumen').innerHTML = `${gastoSemanal()}
+    <div class="card"><h2>Lo que compró cada uno en ${esc(nombreMes)}</h2>
+      ${delMes.length ? `
+      <div class="line"><span>${esc(nombre('a'))}</span><b>${money(b.pagoA)}</b></div>
+      <div class="line"><span>${esc(nombre('b'))}</span><b>${money(b.pagoB)}</b></div>
+      <div class="line total"><span>Total</span><span>${money(b.total)}</span></div>` : '<p class="muted">Aún no hay compras este mes.</p>'}
+    </div>
+    ${cats.length ? `<div class="card"><h2>Por categoría</h2>
+      ${cats.map(([c, v]) => `<div style="margin-bottom:10px"><div class="buyer" style="margin:0"><span>${CAT[c] || '🧾'} ${esc(c)}</span><b>${money(v)}</b></div><div class="bar"><span style="display:block;height:100%;width:${v / maxC * 100}%;background:var(--primary)"></span></div></div>`).join('')}
+    </div>` : ''}`;
 }
 
 function renderConfig() {
@@ -221,100 +229,115 @@ function renderConfig() {
   f.a.value = db.config.a; f.b.value = db.config.b; f.pct.value = db.config.pct; f.moneda.value = db.config.moneda;
 }
 
-/* ---------- eventos ---------- */
-$('#tabs').addEventListener('click', e => {
-  const t = e.target.dataset.tab; if (!t) return;
-  $$('#tabs button').forEach(b => b.classList.toggle('active', b === e.target));
-  $$('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + t));
-  if (!$('#form-deuda').fecha.value || t === 'deudas') $('#form-deuda').fecha.value = today();
-  if (!editId) $('#form-gasto').fecha.value = today();
-});
-
-$('#form-deuda').addEventListener('submit', e => {
-  e.preventDefault();
-  const f = e.target, v = Object.fromEntries(new FormData(f));
-  db.deudas.push({ id: uid(), tipo: v.tipo, persona: v.persona.trim(), monto: round(+v.monto), fecha: v.fecha, vence: v.vence, concepto: v.concepto.trim(), pagos: [] });
-  f.reset(); f.fecha.value = today(); save();
-});
-
-$('#lista-deudas').addEventListener('click', e => {
-  const t = e.target, ds = t.dataset;
-  const find = id => db.deudas.find(d => d.id === id);
-  if (ds.pagar) {
-    const d = find(ds.pagar), v = round(+$(`[data-abono="${ds.pagar}"]`).value);
-    if (!(v > 0)) return;
-    d.pagos.push({ id: uid(), monto: Math.min(v, saldo(d)), fecha: today() }); save();
-  } else if (ds.liquidar) {
-    const d = find(ds.liquidar); d.pagos.push({ id: uid(), monto: saldo(d), fecha: today() }); save();
-  } else if (ds.deldeuda) {
-    if (confirm('¿Eliminar esta deuda y sus pagos?')) { db.deudas = db.deudas.filter(d => d.id !== ds.deldeuda); save(); }
-  } else if (ds.delpago) {
-    e.preventDefault();
-    const [did, pid] = ds.delpago.split('|'), d = find(did); d.pagos = d.pagos.filter(p => p.id !== pid); save();
-  }
-});
-$('#f-tipo').addEventListener('change', renderDeudas);
-$('#f-estado').addEventListener('change', renderDeudas);
-
-let editId = null;
-function endEdit() {
-  editId = null;
-  const f = $('#form-gasto');
-  f.monto.value = ''; f.descripcion.value = ''; f.pctA.value = db.config.pct; f.fecha.value = today();
-  $('#btn-gasto').textContent = 'Agregar compra'; $('#btn-cancel-edit').hidden = true;
-  $('#form-gasto-titulo').textContent = 'Nueva compra del hogar';
+function renderForm() {                       // nombres en el formulario de compra
+  $('#pg-a').textContent = nombre('a'); $('#pg-b').textContent = nombre('b');
+  $$('.nombreA').forEach(e => { e.textContent = nombre('a'); });
+  $('#pct-def').textContent = `${db.config.pct}/${100 - db.config.pct}`;
 }
+
+/* ---------- navegación ---------- */
+function showTab(t) {
+  $$('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
+  $$('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + t));
+  $('#fab').hidden = t === 'config';
+  window.scrollTo(0, 0);
+}
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-tab]');
+  if (t) showTab(t.dataset.tab);
+  if (e.target.closest('[data-close]')) closeSheets();
+});
+
+/* ---------- compra: crear / editar / eliminar ---------- */
+let editId = null;
+const sheetGasto = $('#sheet-gasto');
+function closeSheets() { $$('.sheet').forEach(s => { s.hidden = true; }); editId = null; }
+
+function openGasto(g) {
+  const f = $('#form-gasto');
+  editId = g ? g.id : null;
+  f.pagador.value = g ? g.pagador : (f.pagador.value || 'a');
+  f.monto.value = g ? g.monto : '';
+  f.descripcion.value = g ? g.descripcion : '';
+  f.categoria.value = g ? g.categoria : 'Supermercado';
+  f.fecha.value = g ? g.fecha : today();
+  f.pctA.value = g ? g.pctA : db.config.pct;
+  $('#form-gasto-titulo').textContent = g ? 'Editar compra' : 'Nueva compra';
+  $('#btn-gasto').textContent = g ? 'Guardar cambios' : 'Guardar compra';
+  $('#btn-del-gasto').hidden = !g;
+  $('#aviso-hora').textContent = g ? `Te quedan ${minsLeft(g)} min para modificarla.` : 'Podrás editarla o borrarla durante 1 hora; después queda bloqueada.';
+  $('#form-gasto details').open = !!g && g.pctA !== db.config.pct;
+  sheetGasto.hidden = false;
+  if (!g) f.monto.focus();
+}
+$('#fab').addEventListener('click', () => openGasto(null));
+
 $('#form-gasto').addEventListener('submit', e => {
   e.preventDefault();
   const f = e.target, v = Object.fromEntries(new FormData(f));
   const datos = { pagador: v.pagador, monto: round(+v.monto), fecha: v.fecha, categoria: v.categoria, descripcion: v.descripcion.trim(), pctA: Math.min(100, Math.max(0, +v.pctA)) };
+  if (!(datos.monto > 0)) return;
   if (editId) {
     const g = db.gastos.find(x => x.id === editId);
-    if (!g || !editable(g)) { alert('Pasó más de una hora: este registro ya no se puede modificar.'); endEdit(); render(); return; }
+    if (!g || !editable(g)) { toast('Pasó más de una hora: ya no se puede modificar.'); closeSheets(); render(); return; }
     Object.assign(g, datos);
   } else {
     db.gastos.push({ id: uid(), tipo: 'compra', creado: Date.now(), ...datos });
   }
-  endEdit(); save();
+  closeSheets(); save();
+  toast('Guardado ✓');
 });
-$('#btn-cancel-edit').addEventListener('click', endEdit);
-$('#f-vista').addEventListener('change', () => { $('#f-periodo').innerHTML = ''; renderHogar(); });
-$('#f-periodo').addEventListener('change', renderHogar);
-setInterval(renderHogar, 60000); // bloquea los registros cuando se cumple la hora
+$('#btn-del-gasto').addEventListener('click', () => {
+  const g = db.gastos.find(x => x.id === editId);
+  if (!g || !editable(g)) { toast('Pasó más de una hora: es inmutable.'); closeSheets(); render(); return; }
+  if (!confirm('¿Eliminar esta compra?')) return;
+  db.gastos = db.gastos.filter(x => x.id !== editId);
+  closeSheets(); save();
+});
 
-$('#balance-hogar').addEventListener('click', e => {
-  if (e.target.id !== 'btn-liquidar') return;
-  const b = balance(db.gastos);
-  const deudor = b.netoA > 0 ? 'b' : 'a';
-  db.gastos.push({ id: uid(), tipo: 'liquidacion', pagador: deudor, monto: Math.abs(b.netoA), fecha: today(), creado: Date.now() });
-  save();
-});
 $('#lista-gastos').addEventListener('click', e => {
-  const ds = e.target.dataset, id = ds.delgasto || ds.editgasto; if (!id) return;
-  e.preventDefault();
-  const g = db.gastos.find(x => x.id === id);
-  if (!g || !editable(g)) { alert('Pasó más de una hora: este registro es inmutable.'); render(); return; }
-  if (ds.editgasto) {
-    if (g.tipo !== 'compra') return;
-    const f = $('#form-gasto');
-    editId = id;
-    f.pagador.value = g.pagador; f.monto.value = g.monto; f.fecha.value = g.fecha;
-    f.categoria.value = g.categoria; f.descripcion.value = g.descripcion; f.pctA.value = g.pctA;
-    $('#btn-gasto').textContent = 'Guardar cambios'; $('#btn-cancel-edit').hidden = false;
-    $('#form-gasto-titulo').textContent = 'Editar compra';
-    f.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  } else if (confirm('¿Eliminar este movimiento?')) {
-    if (editId === id) endEdit();
-    db.gastos = db.gastos.filter(x => x.id !== id); save();
-  }
+  const row = e.target.closest('[data-mov]'); if (!row) return;
+  const g = db.gastos.find(x => x.id === row.dataset.mov);
+  if (!g) return;
+  if (!editable(g)) { toast('🔒 Pasó más de una hora: este registro es inmutable.'); return; }
+  if (g.tipo === 'compra') openGasto(g);
+  else if (confirm('¿Eliminar este pago?')) { db.gastos = db.gastos.filter(x => x.id !== g.id); save(); }
+});
+$('#f-vista').addEventListener('change', () => { $('#f-periodo').innerHTML = ''; renderMovs(); });
+$('#f-periodo').addEventListener('change', renderMovs);
+setInterval(render, 60000); // bloquea los registros cuando se cumple la hora
+
+/* ---------- registrar pago ---------- */
+$('#tab-inicio').addEventListener('click', e => {
+  if (e.target.id !== 'btn-pagar') return;
+  const b = balance(pendientes());
+  const deuda = Math.abs(b.netoA);
+  if (deuda < 0.005) return;
+  const deudor = b.netoA > 0 ? 'b' : 'a';
+  $('#pago-box').innerHTML = `<h2>Registrar pago</h2>
+    <p class="muted"><b>${esc(nombre(deudor))}</b> le paga a <b>${esc(nombre(otro(deudor)))}</b>. Puedes pagar todo o una parte.</p>
+    <form id="form-pago">
+      <label class="field">Monto
+        <input name="monto" class="big" type="number" inputmode="decimal" step="0.01" min="0.01" max="${deuda}" value="${deuda}" required>
+      </label>
+      <button class="primary wide">Confirmar pago</button>
+    </form>`;
+  $('#sheet-pago').hidden = false;
+  $('#form-pago').addEventListener('submit', ev => {
+    ev.preventDefault();
+    const m = Math.min(round(+ev.target.monto.value), deuda);
+    if (!(m > 0)) return;
+    db.gastos.push({ id: uid(), tipo: 'liquidacion', pagador: deudor, monto: m, fecha: today(), creado: Date.now() });
+    closeSheets(); save(); toast('Pago registrado ✓');
+  });
 });
 
+/* ---------- ajustes ---------- */
 $('#form-config').addEventListener('submit', e => {
   e.preventDefault();
   const f = e.target;
   db.config = { a: f.a.value.trim(), b: f.b.value.trim(), pct: Math.min(100, Math.max(0, +f.pct.value)), moneda: f.moneda.value.trim() };
-  $('#form-gasto [name=pctA]').value = db.config.pct;
-  save(); f.querySelector('button').blur();
+  save(); f.querySelector('button').blur(); toast('Guardado ✓');
 });
 
 $('#btn-export').addEventListener('click', () => {
@@ -326,8 +349,8 @@ $('#btn-import').addEventListener('change', async e => {
   const file = e.target.files[0]; if (!file) return;
   try {
     const d = JSON.parse(await file.text());
-    if (!Array.isArray(d.deudas) || !Array.isArray(d.gastos)) throw 0;
-    if (confirm('Esto reemplazará los datos actuales. ¿Continuar?')) { db = { ...defaults(), ...d }; save(); }
+    if (!Array.isArray(d.gastos)) throw 0;
+    if (confirm('Esto reemplazará los datos actuales. ¿Continuar?')) { db = { ...defaults(), ...d, config: { ...defaults().config, ...d.config } }; save(); }
   } catch { alert('Archivo no válido.'); }
   e.target.value = '';
 });
@@ -441,8 +464,6 @@ async function initRemote() {
   if (data.session) afterAuth(data.session.user); else authScreen();
 }
 
-$('#form-deuda').fecha.value = today();
-$('#form-gasto').fecha.value = today();
 render();
 if (remoteOn) initRemote(); else setSync('Modo local (sin nube)');
 
